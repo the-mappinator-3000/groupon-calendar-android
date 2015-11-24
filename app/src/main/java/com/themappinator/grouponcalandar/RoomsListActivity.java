@@ -13,7 +13,6 @@ import android.os.AsyncTask;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
-import android.util.Log;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -30,9 +29,7 @@ import com.google.api.client.json.jackson2.JacksonFactory;
 import com.google.api.client.util.DateTime;
 import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.services.calendar.CalendarScopes;
-import com.google.api.services.calendar.model.Event;
-import com.google.api.services.calendar.model.EventAttendee;
-import com.google.api.services.calendar.model.Events;
+import com.google.api.services.calendar.model.FreeBusyCalendar;
 import com.google.api.services.calendar.model.FreeBusyRequest;
 import com.google.api.services.calendar.model.FreeBusyRequestItem;
 import com.google.api.services.calendar.model.FreeBusyResponse;
@@ -40,7 +37,9 @@ import com.google.api.services.calendar.model.FreeBusyResponse;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class RoomsListActivity extends Activity {
     GoogleAccountCredential mCredential;
@@ -52,6 +51,8 @@ public class RoomsListActivity extends Activity {
     static final int REQUEST_GOOGLE_PLAY_SERVICES = 1002;
     private static final String PREF_ACCOUNT_NAME = "accountName";
     private static final String[] SCOPES = { CalendarScopes.CALENDAR_READONLY };
+    private String[] floors;
+    private Map<String, String> prettyNameByGoogleResourceId;
 
     /**
      * Create the main activity.
@@ -60,6 +61,9 @@ public class RoomsListActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        floors = getResources().getStringArray(R.array.floors);
+        prettyNameByGoogleResourceId = new HashMap<>();
+
         LinearLayout activityLayout = new LinearLayout(this);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -165,7 +169,7 @@ public class RoomsListActivity extends Activity {
             chooseAccount();
         } else {
             if (isDeviceOnline()) {
-                new MakeRequestTask(mCredential).execute();
+                new MakeRequestTask(mCredential).execute(floors[0]);
             } else {
                 mOutputText.setText("No network connection available.");
             }
@@ -230,7 +234,7 @@ public class RoomsListActivity extends Activity {
      * An asynchronous task that handles the Google Calendar API call.
      * Placing the API calls in their own task ensures the UI stays responsive.
      */
-    private class MakeRequestTask extends AsyncTask<Void, Void, List<String>> {
+    private class MakeRequestTask extends AsyncTask<String, Void, List<String>> {
         private com.google.api.services.calendar.Calendar mService = null;
         private Exception mLastError = null;
 
@@ -248,9 +252,9 @@ public class RoomsListActivity extends Activity {
          * @param params no parameters needed for this task.
          */
         @Override
-        protected List<String> doInBackground(Void... params) {
+        protected List<String> doInBackground(String... params) {
             try {
-                return getDataFromApi();
+                return getDataFromApi(params[0]);
             } catch (Exception e) {
                 mLastError = e;
                 cancel(true);
@@ -263,45 +267,17 @@ public class RoomsListActivity extends Activity {
          * @return List of Strings describing returned events.
          * @throws IOException
          */
-        private List<String> getDataFromApi() throws IOException {
-            // List the next 10 events from the primary calendar.
+        private List<String> getDataFromApi(String floor) throws IOException {
+            // List the next free events for the given location events from the primary calendar.
             DateTime now = new DateTime(System.currentTimeMillis());
-            List<String> eventStrings = new ArrayList<String>();
-            Events events = mService.events().list("primary")
-                    .setMaxResults(10)
-                    .setTimeMin(now)
-                    .setOrderBy("startTime")
-                    .setSingleEvents(true)
-                    .execute();
-            List<Event> items = events.getItems();
-
-            for (Event event : items) {
-                DateTime start = event.getStart().getDateTime();
-                if (start == null) {
-                    // All-day events don't have start times, so just use
-                    // the start date.
-                    start = event.getStart().getDate();
-                }
-                eventStrings.add(
-                        String.format("%s (%s)", event.getSummary(), start));
-
-                if(event.getSummary().equals("TestToGetResources")) {
-                    for (EventAttendee attendee : event.getAttendees()) {
-                        Log.d("attendees", "DisplayName:" + attendee.getDisplayName() + ", email:" + attendee.getEmail() + ", id:" + attendee.getId());
-                    }
-                }
-            }
-
             List<FreeBusyRequestItem> fbItems = new ArrayList<>();
 
-            String[] floors = getResources().getStringArray(R.array.floors);
-            for (String floor : floors) {
-                String[] rooms = getResources().getStringArray(getResources().getIdentifier(floor,"array", getApplicationInfo().packageName));
-                for (String room : rooms) {
-                    fbItems.add(new FreeBusyRequestItem().setId(CalendarUtils.getResourceString(room, RoomsListActivity.this)));
-                }
+            String[] rooms = getResources().getStringArray(getResources().getIdentifier(floor,"array", getApplicationInfo().packageName));
+            for (String room : rooms) {
+                String googleResource = CalendarUtils.getResourceString(room, RoomsListActivity.this);
+                prettyNameByGoogleResourceId.put(googleResource, room);
+                fbItems.add(new FreeBusyRequestItem().setId(googleResource));
             }
-
 
             FreeBusyResponse freebusy = mService.freebusy().query(
                     new FreeBusyRequest()
@@ -310,11 +286,15 @@ public class RoomsListActivity extends Activity {
                             .setItems(fbItems)
             )
                     .execute();
-            Log.d("fb",freebusy.toString());
 
+            List<String> freeBusy = new ArrayList<>();
+            for ( Map.Entry<String, FreeBusyCalendar> entry : freebusy.getCalendars().entrySet()) {
+                FreeBusyCalendar cal = entry.getValue();
+                String info = "Room " + prettyNameByGoogleResourceId.get(entry.getKey()) + " is busy at times " + cal.getBusy().toString();
+                freeBusy.add(info);
+            }
 
-
-            return eventStrings;
+            return freeBusy;
         }
 
 
